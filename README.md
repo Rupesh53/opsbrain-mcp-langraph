@@ -44,7 +44,7 @@ The system is built using a **multi-agent workflow**:
 ## 📁 Project Structure
 
 ```
-k8s-ai-agent/
+opsbrain-mcp-langraph/
 │
 ├── agent.py          # LangGraph multi-agent workflow
 ├── mcp_server.py     # Tool definitions (kubectl commands)
