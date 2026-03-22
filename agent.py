@@ -1,6 +1,9 @@
 from langgraph.graph import StateGraph, END
 from typing import TypedDict
 from langchain_community.llms import Ollama
+from metrics import start_metrics_server, llm_latency, llm_requests, llm_errors, agent_steps,node_latency
+
+
 
 # 🔧 Import tools directly (no HTTP MCP)
 from mcp_server import get_pods, check_dns, check_egress, network_policy, cleanup
@@ -15,28 +18,34 @@ class State(TypedDict):
     fix: str
 
 # ✅ Use lightweight model
-llm = Ollama(model="phi")   # change to mistral if RAM allows
+# llm = Ollama(model="phi")   # if running in local and no dockerfile
+llm = Ollama(
+    model="phi",
+    base_url="http://host.docker.internal:11434"
+)
 
 # ------------------------
 # 🧠 AGENT 1: TOOL SELECTOR
 # ------------------------
 def tool_selector(state: State):
     print("\n[Agent] Selecting tool...")
+    agent_steps.labels(node_name="tool").inc()
 
-    query = state["query"].lower()
+    with node_latency.labels("tool").time(): 
+        query = state["query"].lower()
 
-    if "dns" in query:
-        output = check_dns()
-    elif "internet" in query or "egress" in query:
-        output = check_egress()
-    elif "policy" in query:
-        output = network_policy()
-    else:
-        output = get_pods()
+        if "dns" in query:
+            output = check_dns()
+        elif "internet" in query or "egress" in query:
+            output = check_egress()
+        elif "policy" in query:
+            output = network_policy()
+        else:
+            output = get_pods()
 
-    print("\n[DEBUG TOOL OUTPUT]\n", output)  # 🔥 Debug visibility
+        print("\n[DEBUG TOOL OUTPUT]\n", output)  # 🔥 Debug visibility
 
-    return {"tool_output": output}
+        return {"tool_output": output}
 
 
 # ------------------------
@@ -44,38 +53,39 @@ def tool_selector(state: State):
 # ------------------------
 def analyzer(state: State):
     print("\n[Agent] Analyzing issue...")
+    agent_steps.labels(node_name="analyze").inc()   
+    with node_latency.labels("analyze").time():
+        prompt = f"""
+    You are a Kubernetes networking expert.
 
-    prompt = f"""
-You are a Kubernetes networking expert.
+    Analyze the issue using the tool output.
 
-Analyze the issue using the tool output.
+    Rules:
+    - Always give a clear answer
+    - Do NOT say "I cannot help"
+    - If tool output has error → say "Tool execution failed"
+    - Be concise and practical
 
-Rules:
-- Always give a clear answer
-- Do NOT say "I cannot help"
-- If tool output has error → say "Tool execution failed"
-- Be concise and practical
+    Return format:
 
-Return format:
+    Issue:
+    <what is wrong>
 
-Issue:
-<what is wrong>
+    Reason:
+    <why it is happening>
 
-Reason:
-<why it is happening>
+    User Query:
+    {state['query']}
 
-User Query:
-{state['query']}
+    Tool Output:
+    {state['tool_output']}
+    """
+        
+        analysis = call_llm(prompt)
 
-Tool Output:
-{state['tool_output']}
-"""
+        print("\n[DEBUG ANALYSIS]\n", analysis)
 
-    analysis = llm.invoke(prompt)
-
-    print("\n[DEBUG ANALYSIS]\n", analysis)
-
-    return {"analysis": analysis}
+        return {"analysis": analysis}
 
 
 # ------------------------
@@ -83,29 +93,32 @@ Tool Output:
 # ------------------------
 def fixer(state: State):
     print("\n[Agent] Suggesting fix...")
+    agent_steps.labels(node_name="fix").inc()
+    
+    
+    with node_latency.labels("fix").time():
+        prompt = f"""
+    You are a Kubernetes SRE expert.
 
-    prompt = f"""
-You are a Kubernetes SRE expert.
+    Based on the issue below, provide a fix.
 
-Based on the issue below, provide a fix.
+    Rules:
+    - Give exact kubectl commands
+    - Be practical
+    - Do NOT say "I cannot help"
 
-Rules:
-- Give exact kubectl commands
-- Be practical
-- Do NOT say "I cannot help"
+    Issue:
+    {state['analysis']}
 
-Issue:
-{state['analysis']}
+    Return format:
 
-Return format:
+    Fix:
+    <steps + commands>
+    """
 
-Fix:
-<steps + commands>
-"""
+        fix = call_llm(prompt)
 
-    fix = llm.invoke(prompt)
-
-    return {"fix": fix}
+        return {"fix": fix}
 
 
 # ------------------------
@@ -126,11 +139,22 @@ builder.add_edge("fix", END)
 graph = builder.compile()
 
 
+
+
+@llm_latency.time()
+def call_llm(prompt):
+    llm_requests.inc()
+    try:
+        response = llm.invoke(prompt)   # your existing call
+        return response
+    except Exception:
+        llm_errors.inc()
+        raise
 # ------------------------
 # RUN
 # ------------------------
 if __name__ == "__main__":
-
+    start_metrics_server()
     # 🔥 Change your test query here
     query = "Pods cannot access internet"
 
@@ -142,6 +166,6 @@ if __name__ == "__main__":
     print("🧠 FINAL ANALYSIS:\n", result["analysis"])
     print("\n🛠 FINAL FIX:\n", result["fix"])
     print("==============================\n")
-
+   
     # 🧹 Cleanup test pods (optional)
     cleanup()
