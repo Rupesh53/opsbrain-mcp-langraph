@@ -1,0 +1,6 @@
+langgraph
+langchain
+langchain-community
+mcp
+ollama
+requests
